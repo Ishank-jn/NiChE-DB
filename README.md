@@ -12,13 +12,4 @@ NiChE is an ACID-compliant in-memory embedded key-value store based on RocksDB, 
 
 ## Requirements
 
-- Python 3.x
-- rocksdb
-- pickle
-
-## Installation
-
-1. Install dependencies:
-
-   ```bash
-   pip install rocksdb
+- Golang
