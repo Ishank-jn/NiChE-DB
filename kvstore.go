@@ -2,11 +2,11 @@ package main
 
 import (
     "io"
-	"encoding/gob"
-	"fmt"
-	"log"
-	"os"
-	"sync"
+    "encoding/gob"
+    "fmt"
+    "log"
+    "os"
+    "sync"
     "time"
     "strings"
     "path"
@@ -253,7 +253,7 @@ func (db *DB) snapshotRoutine() {
 	}
 }
 
-// saveSnapshot saves a snapshot of the in-memory data to disk.
+// saveSnapshot saves a snapshot of the in-memory data to disk and clears the WAL file.
 func (db *DB) saveSnapshot() {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -273,8 +273,22 @@ func (db *DB) saveSnapshot() {
 		return
 	}
 
-	// Clean up old snapshots
+	// Clean up old snapshots while holding the read lock
 	db.cleanupSnapshots()
+
+	// Clear the WAL file
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	err = db.walLog.Truncate(0)
+	if err != nil {
+		log.Printf("Failed to truncate WAL file: %v", err)
+		return
+	}
+	_, err = db.walLog.Seek(0, 0)
+	if err != nil {
+		log.Printf("Failed to seek to the beginning of WAL file: %v", err)
+		return
+	}
 }
 
 // cleanupSnapshots removes old snapshots, keeping only the latest one.
