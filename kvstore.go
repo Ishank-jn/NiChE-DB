@@ -10,6 +10,14 @@ import (
     "time"
     "strings"
     "path"
+	"net"
+	"compress/zlib"
+	"bytes"
+	"bufio"
+
+	"github.com/golang/snappy"
+	
+	
 )
 
 // DB represents an embedded database.
@@ -19,13 +27,31 @@ type DB struct {
 	walLog       *os.File          // Write-Ahead Log file
 	snapshotDir  string            // Directory to store database snapshots
 	snapshotTTL  time.Duration     // Interval for saving snapshots
+	server         *net.TCPListener  // TCP/IP server for remote access (optional)
+	compressAlgo   string            // Compression algorithm (optional)
+}
+
+// WalEntry represents a log entry in the Write-Ahead Log.
+type WalEntry struct {
+	Op    string
+	Key   string
+	Value []byte
 }
 
 // Open opens a new database instance.
-func Open(path string, snapshotTTL time.Duration) (*DB, error) {
+func Open(path string, snapshotTTL time.Duration, remoteAccess bool, compressAlgo string, batchWrite bool) (*DB, error) {
 	walLog, err := os.OpenFile(path+".wal", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
+	}
+
+	var server *net.TCPListener
+	if remoteAccess {
+		// Start TCP/IP server for remote access
+		server, err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 8080})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	db := &DB{
@@ -33,6 +59,8 @@ func Open(path string, snapshotTTL time.Duration) (*DB, error) {
 		walLog:      walLog,
 		snapshotDir: path,
 		snapshotTTL: snapshotTTL,
+		server:         server,
+		compressAlgo:   compressAlgo,
 	}
 
 	// Recover data from WAL log or snapshot
@@ -43,6 +71,8 @@ func Open(path string, snapshotTTL time.Duration) (*DB, error) {
 
 	// Start snapshot routine
 	go db.snapshotRoutine()
+	// Start TCP server
+	go db.handleRemoteRequests(server)
 
 	return db, nil
 }
@@ -51,7 +81,16 @@ func Open(path string, snapshotTTL time.Duration) (*DB, error) {
 func (db *DB) Get(key string) ([]byte, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	return db.data[key], nil
+	value, ok := db.data[key]
+	if !ok {
+		return nil, fmt.Errorf("key %s does not exist", key)
+	}
+	if db.compressAlgo == "zlib" {
+		value, _ = decompressZlib(value)
+	} else if db.compressAlgo == "snappy" {
+		value, _ = decompressSnappy(value)
+	}
+	return value, nil
 }
 
 // Put inserts or updates the value for the given key.
@@ -59,9 +98,22 @@ func (db *DB) Put(key string, value []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	var err error
+	if db.compressAlgo == "zlib" {
+		value, err = compressZlib(value)
+		if err != nil {
+			return err
+		}
+	} else if db.compressAlgo == "snappy" {
+		value, err = compressSnappy(value)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Write to WAL log
 	enc := gob.NewEncoder(db.walLog)
-	err := enc.Encode(&WalEntry{Op: "put", Key: key, Value: value})
+	err = enc.Encode(&WalEntry{Op: "put", Key: key, Value: value})
 	if err != nil {
 		return err
 	}
@@ -88,19 +140,27 @@ func (db *DB) Delete(key string) error {
 	return nil
 }
 
-// Update modifies the value for the given key using the provided function.
-func (db *DB) Update(key string, updateFunc func([]byte) ([]byte, error)) error {
+// Update modifies the value for the given key.
+func (db *DB) Update(key string, newValue []byte) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	value, ok := db.data[key]
+	_, ok := db.data[key]
 	if !ok {
 		return fmt.Errorf("key %s does not exist", key)
 	}
 
-	newValue, err := updateFunc(value)
-	if err != nil {
-		return err
+	var err error
+	if db.compressAlgo == "zlib" {
+		newValue, err = compressZlib(newValue)
+		if err != nil {
+			return err
+		}
+	} else if db.compressAlgo == "snappy" {
+		newValue, err = compressSnappy(newValue)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Write to WAL log
@@ -134,14 +194,67 @@ func (db *DB) MultiGet(keys []string) (map[string][]byte, error) {
 
 	values := make(map[string][]byte, len(keys))
 	for _, key := range keys {
-		values[key] = db.data[key]
+		value, ok := db.data[key]
+		if !ok {
+			return nil, fmt.Errorf("key %s does not exist", key)
+		}
+		if db.compressAlgo == "zlib" {
+			value, _ = decompressZlib(value)
+		} else if db.compressAlgo == "snappy" {
+			value, _ = decompressSnappy(value)
+		}
+		values[key] = value
 	}
 	return values, nil
 }
 
 // Close closes the database and underlying resources.
 func (db *DB) Close() error {
+	if db.server != nil {
+		db.server.Close()
+	}
 	return db.walLog.Close()
+}
+
+func compressSnappy(data []byte) ([]byte, error) {
+    return snappy.Encode(nil, data), nil
+}
+
+func decompressSnappy(data []byte) ([]byte, error) {
+    decoded, err := snappy.Decode(nil, data)
+    if err != nil {
+        return nil, err
+    }
+    return decoded, nil
+}
+
+// Compression and decompression functions
+func compressZlib(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := zlib.NewWriter(&buf)
+	_, err := writer.Write(data)
+	if err != nil {
+		return nil, err
+	}
+	err = writer.Close()
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func decompressZlib(data []byte) ([]byte, error) {
+	reader, err := zlib.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	buf := bytes.NewBuffer(nil)
+	_, err = io.Copy(buf, reader)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // RepairDB attempts to recover data from the WAL log in case of corruption.
@@ -341,9 +454,93 @@ func (db *DB) cleanupSnapshots() {
 	}
 }
 
-// WalEntry represents a log entry in the Write-Ahead Log.
-type WalEntry struct {
-	Op    string
-	Key   string
-	Value []byte
+func (db *DB) handleRemoteRequests(listener *net.TCPListener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Failed to accept connection: %v", err)
+			continue
+		}
+
+		go db.handleConnection(conn)
+	}
+}
+
+func (db *DB) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	for {
+		request, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Failed to read request: %v", err)
+			return
+		}
+
+		// Parse the request and execute the corresponding database operation
+		parts := strings.Split(strings.TrimSpace(request), " ")
+		if len(parts) < 2 {
+			log.Printf("Invalid request format: %s", request)
+			continue
+		}
+
+		op, key, value := parts[0], parts[1], []byte(nil)
+		if len(parts) > 2 {
+			value = []byte(strings.Join(parts[2:], " "))
+		}
+
+		var response []byte
+		switch op {
+		case "GET":
+			value, err = db.Get(key)
+			if err != nil {
+				response = []byte(err.Error())
+			} else {
+				response = value
+			}
+		case "PUT":
+			err = db.Put(key, value)
+			if err != nil {
+				response = []byte(err.Error())
+			}
+		case "DELETE":
+			err = db.Delete(key)
+			if err != nil {
+				response = []byte(err.Error())
+			}
+		case "UPDATE":
+			err = db.Update(key, value)
+			if err != nil {
+				response = []byte(err.Error())
+			}
+		case "ITERKEYS":
+			keys := db.IterKeys()
+			response = []byte(strings.Join(keys, "\n"))
+		case "MULTIGET":
+			values, err := db.MultiGet(parts[1:])
+			if err != nil {
+				response = []byte(err.Error())
+			} else {
+				var sb strings.Builder
+				for k, v := range values {
+					sb.WriteString(k)
+					sb.WriteByte(' ')
+					sb.Write(v)
+					sb.WriteByte('\n')
+				}
+				response = []byte(sb.String())
+			}
+		default:
+			response = []byte("Invalid operation: " + op)
+		}
+
+		_, err = conn.Write(response)
+		if err != nil {
+			log.Printf("Failed to write response: %v", err)
+			return
+		}
+	}
 }
