@@ -1,5 +1,5 @@
 # NiChE (Nifty Cached Elements)
-# Code is not fully tested, only for research/learning purposes.
+### Code is not fully tested, only for research/learning purposes.
 
 NiChE is an ACID-compliant in-memory embedded key-value store, with support for basic networking capabilities.
 
