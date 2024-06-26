@@ -39,7 +39,7 @@ type WalEntry struct {
 }
 
 // Open opens a new database instance.
-func Open(path string, snapshotTTL time.Duration, remoteAccess bool, compressAlgo string, batchWrite bool) (*DB, error) {
+func Open(path string, snapshotTTL time.Duration, remoteAccess bool, compressAlgo string) (*DB, error) {
 	walLog, err := os.OpenFile(path+".wal", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
