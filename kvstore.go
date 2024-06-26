@@ -10,14 +10,12 @@ import (
     "time"
     "strings"
     "path"
-	"net"
-	"compress/zlib"
-	"bytes"
-	"bufio"
+    "net"
+    "compress/zlib"
+    "bytes"
+    "bufio"
 
-	"github.com/golang/snappy"
-	
-	
+    "github.com/golang/snappy"
 )
 
 // DB represents an embedded database.
