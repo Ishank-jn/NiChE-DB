@@ -133,8 +133,9 @@ func (db *DB) Delete(key string) error {
 		return err
 	}
 
-	// Update in-memory data
-	delete(db.data, key)
+	if _, ok := mdb.data[key]; ok {
+                delete(db.data, key)
+        }
 	return nil
 }
 
